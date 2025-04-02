@@ -31,7 +31,7 @@ public class TextToSpeechGoogle : MonoBehaviour
 
     private AudioSource goAudioSource;
 
-    string url = "https://texttospeech.googleapis.com/v1beta1/text:synthesize?&key=AIzaSyAOViwmf8Y4KGusoMEVhpmSUi6MXkDjGus";
+    string url = "https://texttospeech.googleapis.com/v1beta1/text:synthesize?&key=";
 
     void Start()
     {
