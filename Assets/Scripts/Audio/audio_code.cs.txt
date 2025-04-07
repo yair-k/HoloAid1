@@ -1,62 +1,177 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Audio;
 
 public class AudioObstacleController : MonoBehaviour
 {
-    public float minPulseFrequency = 1f / 5f;
-    public float maxPulseFrequency = 8f;
+    public float minPulseFrequency = 0.2f;
+    public float maxPulseFrequency = 8.0f;
     public AudioSource audioSource;
-    public float cameraBoxSize = 2f;
+    public float cameraBoxSize = 2.0f;
     public float maxPitch = 2.0f;
     public float minPitch = 1.0f;
-
+    public float distanceAttenuationFactor = 1.5f;
+    public AnimationCurve attenuationCurve;
+    public float spatialBlend = 1.0f;
+    public float frequencyModulationIntensity = 0.8f;
+    public int sampleRate = 44100;
+    
     private Camera _camera;
+    private float[] _audioSamples;
+    private const int BUFFER_SIZE = 1024;
+    private double _phase;
+    private float _currentPitch;
+    private float _targetPitch;
+    private float _pitchSmoothingFactor = 8.0f;
+    private Vector3 _lastPosition;
+    private float _movementThreshold = 0.05f;
+    private float _lastDistanceUpdate;
+    private float _updateFrequency = 0.05f;
+    private AudioLowPassFilter _lowPassFilter;
+    private AudioHighPassFilter _highPassFilter;
 
     private void Awake()
     {
         _camera = Camera.main;
+        _audioSamples = new float[BUFFER_SIZE];
+        _phase = 0;
+        _currentPitch = minPitch;
+        _targetPitch = minPitch;
+        _lastPosition = transform.position;
+        _lastDistanceUpdate = 0f;
+        
+        if (!TryGetComponent(out _lowPassFilter))
+            _lowPassFilter = gameObject.AddComponent<AudioLowPassFilter>();
+            
+        if (!TryGetComponent(out _highPassFilter))
+            _highPassFilter = gameObject.AddComponent<AudioHighPassFilter>();
+        
+        InitializeAudioSource();
     }
 
-    // Use this for initialization
-    void Start()
+    private void Start()
     {
-        AudioClip obstacleClip = AudioClip.Create("V_RIOT_synth_one_shot_music_box_02_E", samplerate * 2, 1, samplerate, true, OnAudioRead, OnAudioSetPosition);
-        audioSource = GetComponent<AudioSource>();
+        AudioClip obstacleClip = AudioClip.Create("ObstacleSonar", sampleRate * 2, 1, sampleRate, true, OnAudioRead, OnAudioSetPosition);
+        
+        if (audioSource == null)
+            audioSource = GetComponent<AudioSource>();
+            
         audioSource.clip = obstacleClip;
+        audioSource.loop = true;
+        audioSource.spatialBlend = spatialBlend;
         audioSource.Play();
+        
+        ConfigureAudioFilters();
     }
 
-    // Update is called once per frame
-    void Update()
+    private void InitializeAudioSource()
     {
-        //TODO: find the realtive height with cam
-        //TODO: distance
-
-        double dist = Vector3.Distance(transform.position, _camera.gameObject.transform.position);
-        float newPitch = 0f;
-        float heightDifference = transform.position.y - _camera.transform.position.y;
-        //Debug.Log("Height difference for " + beacon.name + ": " + heightDifference);
-
-        if (heightDifference >= cameraBoxSize * 0.25)
+        if (audioSource == null)
         {
-            newPitch = maxPitch;
-            // Debug.Log(beacon.name + "Maximum pitch reached");
+            audioSource = GetComponent<AudioSource>();
+            if (audioSource == null)
+                audioSource = gameObject.AddComponent<AudioSource>();
         }
-
-        else if (heightDifference <= cameraBoxSize * (-0.75))
+        
+        audioSource.playOnAwake = false;
+        audioSource.spatialize = true;
+        audioSource.priority = 0;
+        audioSource.minDistance = 0.1f;
+        audioSource.maxDistance = 15.0f;
+        audioSource.rolloffMode = AudioRolloffMode.Custom;
+        
+        if (attenuationCurve == null || attenuationCurve.length == 0)
         {
-            newPitch = minPitch;
-            // Debug.Log(beacon.name + "Minimum pitch reached");
+            attenuationCurve = new AnimationCurve();
+            attenuationCurve.AddKey(0, 1.0f);
+            attenuationCurve.AddKey(0.5f, 0.5f);
+            attenuationCurve.AddKey(1.0f, 0.0f);
         }
-
-        else
-        {
-            newPitch = (minPitch + (maxPitch - minPitch) * (heightDifference + 0.75f * cameraBoxSize) / cameraBoxSize);
-            // Debug.Log(beacon.name + " New pitch: " + newPitch);
-        }
-
-
+        
+        audioSource.SetCustomCurve(AudioSourceCurveType.CustomRolloff, attenuationCurve);
+    }
+    
+    private void ConfigureAudioFilters()
+    {
+        _lowPassFilter.cutoffFrequency = 5000;
+        _lowPassFilter.lowpassResonanceQ = 1.0f;
+        _highPassFilter.cutoffFrequency = 200;
+        _highPassFilter.highpassResonanceQ = 1.0f;
     }
 
+    private void Update()
+    {
+        if (Time.time - _lastDistanceUpdate > _updateFrequency || 
+            Vector3.Distance(transform.position, _lastPosition) > _movementThreshold)
+        {
+            CalculateAudioParameters();
+            _lastPosition = transform.position;
+            _lastDistanceUpdate = Time.time;
+        }
+        
+        SmoothPitchTransition();
+        ApplySpatialEffects();
+    }
+    
+    private void CalculateAudioParameters()
+    {
+        double distance = Vector3.Distance(transform.position, _camera.transform.position);
+        float heightDifference = transform.position.y - _camera.transform.position.y;
+        
+        if (heightDifference >= cameraBoxSize * 0.25f)
+            _targetPitch = maxPitch;
+        else if (heightDifference <= cameraBoxSize * (-0.75f))
+            _targetPitch = minPitch;
+        else
+            _targetPitch = minPitch + (maxPitch - minPitch) * (heightDifference + 0.75f * cameraBoxSize) / cameraBoxSize;
+            
+        float volumeLevel = Mathf.Clamp01(1.0f / Mathf.Pow((float)distance, distanceAttenuationFactor));
+        audioSource.volume = volumeLevel;
+        
+        float cutoffFrequency = Mathf.Lerp(500, 5000, volumeLevel);
+        _lowPassFilter.cutoffFrequency = cutoffFrequency;
+    }
+    
+    private void SmoothPitchTransition()
+    {
+        _currentPitch = Mathf.Lerp(_currentPitch, _targetPitch, Time.deltaTime * _pitchSmoothingFactor);
+        audioSource.pitch = _currentPitch;
+    }
+    
+    private void ApplySpatialEffects()
+    {
+        Vector3 directionToCamera = _camera.transform.position - transform.position;
+        float angle = Vector3.Angle(directionToCamera, transform.forward);
+        float normalizedAngle = angle / 180.0f;
+        
+        float highPassValue = Mathf.Lerp(200, 1000, normalizedAngle);
+        _highPassFilter.cutoffFrequency = highPassValue;
+    }
+
+    private void OnAudioRead(float[] data)
+    {
+        float frequency = Mathf.Lerp(220.0f, 880.0f, (_currentPitch - minPitch) / (maxPitch - minPitch));
+        double increment = frequency * 2.0 * Math.PI / sampleRate;
+        
+        for (int i = 0; i < data.Length; i++)
+        {
+            _phase += increment;
+            if (_phase > 2 * Math.PI) _phase -= 2 * Math.PI;
+            
+            float baseSignal = (float)Math.Sin(_phase);
+            float modulationFactor = 1.0f + frequencyModulationIntensity * Mathf.Sin(Time.time * 3.0f);
+            
+            data[i] = baseSignal * modulationFactor * 0.5f;
+            
+            if (i % 128 == 0)
+                frequency = Mathf.Lerp(frequency, Mathf.Lerp(220.0f, 880.0f, (_currentPitch - minPitch) / (maxPitch - minPitch)), 0.05f);
+        }
+    }
+
+    private void OnAudioSetPosition(int newPosition)
+    {
+        _phase = 0;
+    }
 }
